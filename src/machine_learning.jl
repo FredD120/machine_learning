@@ -1,10 +1,11 @@
 using HDF5
 using GLMakie
 using Scylla
-using .Threads
 using BenchmarkTools
+import .Threads
+import Serialization
 
-const SLICE = 1_000_000
+const SLICE = 1_428_000 # max size zurichess = 1_428_000
 
 "Retrieve piece square tables from file"
 function get_pst(type)
@@ -70,18 +71,22 @@ function Position(fen::S, result::S) where {S <: AbstractString}
     end
     
     occupied = UInt32[]
+    values = Float32[]
     for (i, f) in enumerate(features)
-        f != 0 ? push!(occupied, i) : nothing
+        if f != 0
+            push!(occupied, i)
+            push!(values, f)
+        end
     end
 
-    return Position(features, score, occupied, Scylla.evaluate(board))
+    return Position(values, score, occupied, Scylla.evaluate(board))
 end
 
 function get_features()
     data = readlines(pwd() * "\\data\\zurichess.epd")
 
     positions = Vector{Position}(undef, length(data))
-    #=@threads=# for i in eachindex(data[1:SLICE])
+    for i in eachindex(data[1:SLICE])
         arr = split(data[i], "c9")
         positions[i] = Position(arr[1], arr[2])
     end
@@ -90,9 +95,10 @@ end
 
 function dot(pos::Position, pst)
     count = Float32(0)
-    for i in pos.occupied
-        count += pos.features[i] * pst[i]
+    for (linear_index, jump_index) in enumerate(pos.occupied)
+        count += pos.features[linear_index] * pst[jump_index]
     end
+    @assert floor(Int16, count) == pos.original_eval
     return count
 end
 
@@ -104,8 +110,15 @@ function evaluate_all(pos, eval)
     return count
 end
 
+function create_feature_data(filename)
+    pos = get_features()
+    Serialization.serialize(filename, pos)
+end
+
 function main()
-    @time pos = get_features()
+    filename = "$(dirname(@__DIR__))/data/zurichess_serialize"
+    #@time create_feature_data(filename)
+    @time pos = Serialization.deserialize(filename)
     eval = get_evaluation()
     @btime c = evaluate_all($pos, $eval)
     #evaluate_all(pos, eval)
