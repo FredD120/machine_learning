@@ -27,7 +27,6 @@ Manifest*.toml
 LocalPreferences.toml
 JuliaLocalPreferences.toml
 
-*.md
 .vscode
 *.bat
 data
