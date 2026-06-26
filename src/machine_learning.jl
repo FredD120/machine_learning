@@ -6,10 +6,10 @@ import .Threads
 import Serialization
 import Random
 
-const DATA_SIZE = 1_000_000    # max size zurichess = 1_428_000
-const BATCH_SIZE = 1    # train in batches for efficiency
-const K_VALUE = 3.0 / 500    # hyperparameter in sigmoid function
-const α = 1e-1               # learning rate
+const DATA_SIZE = 1_428_000       # max size zurichess = 1_428_000
+const BATCH_SIZE = 8            # train in batches for efficiency
+const K_VALUE = 3.0 / 500         # hyperparameter in sigmoid function
+const LEARNING_RATE = 1f2
 
 "retrieve piece square tables from file"
 function get_pst(type)
@@ -86,11 +86,12 @@ function Position(fen::S, result::S) where {S <: AbstractString}
     return Position(values, score, occupied, Scylla.evaluate(board))
 end
 
-function get_positions()::Vector{Position}
+function get_positions(max_positions = DATA_SIZE)::Vector{Position}
     data = readlines(pwd() * "\\data\\zurichess.epd")
+    position_count = min(max_positions, length(data))
 
-    positions = Vector{Position}(undef, DATA_SIZE)
-    for i in eachindex(data[1:DATA_SIZE])
+    positions = Vector{Position}(undef, position_count)
+    for i in 1:position_count
         arr = split(data[i], "c9")
         positions[i] = Position(arr[1], arr[2])
     end
@@ -111,13 +112,13 @@ normalised_quality(pos::Position, weights, k) = 2 * sigmoid(quality(pos, weights
 
 calculate_error(pos::Position, weights, k) = normalised_quality(pos, weights, k) - pos.score
 
-function mean_squared_error(positions::Vector{Position}, weights::Vector{Float32})
+function mean_squared_error(positions::Vector{Position}, weights::Vector{Float32}; k = K_VALUE)
     error = Float32(0.0)
-    for position in @view positions[1:DATA_SIZE]
-        diff = calculate_error(position, weights, K_VALUE)
+    for position in positions
+        diff = calculate_error(position, weights, k)
         error += diff * diff
     end
-    return error / DATA_SIZE
+    return error / length(positions)
 end
 
 function create_feature_data(filename)
@@ -125,10 +126,10 @@ function create_feature_data(filename)
     Serialization.serialize(filename, positions)
 end
 
-function plot_error(feature_set, eval, BUCKET_COUNT = 100)
+function plot_error(feature_set, eval, BUCKET_COUNT = 100; k = K_VALUE)
     buckets = zeros(BUCKET_COUNT)
-    for position in feature_set[1:DATA_SIZE]
-        loss = calculate_error(position, eval, K_VALUE)
+    for position in feature_set
+        loss = calculate_error(position, eval, k)
         ind = floor(Int16, (BUCKET_COUNT - 1) * (loss + 2) / 4) + 1
         buckets[ind] += 1
     end
@@ -138,7 +139,7 @@ end
 
 function plot_evaluation(feature_set::Vector{Position}, BUCKET_COUNT = 100)
     buckets = zeros(BUCKET_COUNT)
-    for position in feature_set[1:DATA_SIZE]
+    for position in feature_set
         ind = floor(Int16, (BUCKET_COUNT - 1) * (1 + position.original_eval / 900) / 2)
         ind = min(BUCKET_COUNT, max(1, ind + 1))
         buckets[ind] += 1
@@ -148,38 +149,50 @@ end
 
 "take a vector and split into a vector of vectors, each of length batch_size"
 function batches(vec, batch_size)
+    batch_size > 0 || throw(ArgumentError("batch_size must be positive"))
     len = length(vec)
-    left = collect(1:batch_size:len)
-    right = collect(batch_size:batch_size:len)
-    return map((l, r) -> vec[l:r], left, right)
+    return [@view vec[i:min(i + batch_size - 1, len)] for i in 1:batch_size:len]
 end
 
 "loop over all weights and nudge them in the direction that minimises the loss"
-function gradient_descent!(weights::Vector{Float32}, positions::Vector{Position})
+function gradient_descent!(
+    weights::Vector{Float32},
+    positions::Vector{Position};
+    batch_size = BATCH_SIZE,
+    learning_rate = LEARNING_RATE,
+    k = K_VALUE,
+)
     Random.shuffle!(positions)
 
-    for batch in batches(positions, BATCH_SIZE)
+    for batch in batches(positions, batch_size)
         gradient = zeros(Float32, length(weights))
 
         for position in batch
             y = position.score
-            σₖ = sigmoid(quality(position, weights), K_VALUE)
+            sigma_k = sigmoid(quality(position, weights), k)
 
-            derivative = (2 * σₖ - 1 - y) * (1 - σₖ) * σₖ
+            derivative = (2 * sigma_k - 1 - y) * (1 - sigma_k) * sigma_k
 
             for (linear_ind, jump_ind) in enumerate(position.occupied)
                 gradient[jump_ind] += position.features[linear_ind] * derivative
             end
         end
 
-        weights .-= (4 * K_VALUE * α / length(batch)) * gradient
+        weights .-= (4 * k * learning_rate / length(batch)) * gradient
     end
 end
 
-function run_gradient_descent!(weights::Vector{Float32}, positions::Vector{Position})
-    for i in 1:10
-        gradient_descent!(weights, positions)
-        println("Pass ", i, " completed, loss = ", mean_squared_error(positions, weights))
+function run_gradient_descent!(
+    weights::Vector{Float32},
+    positions::Vector{Position};
+    epochs = 100,
+    batch_size = BATCH_SIZE,
+    learning_rate = LEARNING_RATE,
+    k = K_VALUE,
+)
+    for i in 1:epochs
+        gradient_descent!(weights, positions; batch_size, learning_rate, k)
+        println("Pass ", i, " completed, loss = ", mean_squared_error(positions, weights; k))
     end
 end
 
@@ -196,4 +209,5 @@ function main()
     #plot_error(features, weights)
     #plot_evaluation(features)
 end
+
 main()
