@@ -7,11 +7,10 @@ import Serialization
 import Random
 
 const DATA_SIZE = 1_428_000    # max size zurichess = 1_428_000
-const BATCH_SIZE = 8           # train in batches for efficiency
-const K_VALUE = 3.0 / 500      # hyperparameter in sigmoid function
-const LEARNING_RATE = 1f1      # small = slower convergence but no overshooting
-const TOLERANCE = 1e-5         # convergence criterion for loss
-const MAX_EPOCHS = 1000        # final cutoff point for training
+const BATCH_SIZE = 4           # train in batches for efficiency
+const K_VALUE = 4.0 / 500      # hyperparameter in sigmoid function
+const LEARNING_RATE = 1f2      # small = slower convergence but no overshooting
+const MAX_EPOCHS = 500         # final cutoff point for training
 
 const PST_TYPES = ["king", "queen", "rook", "bishop", "knight", "pawn"]
 const PST_TABLE_SIZE = 64
@@ -275,10 +274,8 @@ function run_gradient_descent!(
     max_epochs = MAX_EPOCHS,
     batch_size = BATCH_SIZE,
     learning_rate = LEARNING_RATE,
-    k = K_VALUE,
-    tol = TOLERANCE)
+    k = K_VALUE)
 
-    prev_loss = typemax(Float32)
     count = 0
     losses = Float32[]
     while count < max_epochs
@@ -288,12 +285,20 @@ function run_gradient_descent!(
         push!(losses, loss)
 
         println("Epoch ", count, " completed, loss = ", loss)
-        if (prev_loss - loss) < tol
-            break
-        end
-        prev_loss = loss
     end
     return losses
+end
+
+function plot_loss(loss)
+    fig = Figure()
+    ax = Axis(fig[1, 1])
+    ax.xlabel = "Epoch"
+    ax.ylabel = "Loss"
+
+    xs = [i for i in 1:length(loss)]
+    GLMakie.lines!(ax, xs, loss)
+    display(fig)
+    return
 end
 
 function main()
@@ -302,8 +307,10 @@ function main()
     features = Serialization.deserialize(filename)
     weights = get_weights()
 
-    run_gradient_descent!(weights, features)
-    #store_weights(weights)
+    losses = run_gradient_descent!(weights, features)
+    store_weights(weights)
+
+    plot_loss(losses)
 
     #@btime c = evaluate_all($features, $weights)
     #@btime mean_squared_error($features, $weights)
@@ -317,24 +324,21 @@ function plot_results()
 end
 
 function parameter_scan(; filename = "$(dirname(@__DIR__))/data/zurichess_serialize")
-    batch_sizes = [8, 32, 128]
-    learning_rates = [1f0, 1f1, 1f2]
-    parameters = [(b, r) for b in batch_sizes for r in learning_rates]
-    final_loss = zeros(Float32, 9)
+    parameters = [2, 3, 4, 5, 6] / 500
+    final_loss = zeros(Float32, length(parameters))
     features = Serialization.deserialize(filename)
     
     Threads.@threads for i in eachindex(parameters)
         weights = get_weights()
         
         losses = run_gradient_descent!(weights, copy(features),
-        batch_size = parameters[i][1],
-        learning_rate = parameters[i][2])
+        k = parameters[i][1])
         final_loss[i] = losses[end]
     end
     println(final_loss)
     println(parameters)
 end
 
-#main()
+main()
 #plot_results()
-parameter_scan()
+#parameter_scan()
