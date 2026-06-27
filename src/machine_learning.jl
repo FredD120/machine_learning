@@ -7,10 +7,10 @@ import Serialization
 import Random
 
 const DATA_SIZE = 1_428_000    # max size zurichess = 1_428_000
-const BATCH_SIZE = 4           # train in batches for efficiency
+const BATCH_SIZE = 4         # train in batches for efficiency
 const K_VALUE = 4.0 / 500      # hyperparameter in sigmoid function
-const LEARNING_RATE = 1f2      # small = slower convergence but no overshooting
-const MAX_EPOCHS = 500         # final cutoff point for training
+const LEARNING_RATE = 1f1      # small = slower convergence but no overshooting
+const MAX_EPOCHS = 10_000        # final cutoff point for training
 
 const PST_TYPES = ["king", "queen", "rook", "bishop", "knight", "pawn"]
 const PST_TABLE_SIZE = 64
@@ -283,12 +283,11 @@ function run_gradient_descent!(
         count += 1
         gradient_descent!(weights, positions; batch_size, learning_rate, k)
 
-        if count % 5 == 0
+        if count % 10 == 0
             loss = mean_squared_error(positions, weights; k)
             push!(losses, loss)
             println("Epoch ", count, " completed, loss = ", loss)
         end
-
     end
     return losses
 end
@@ -312,7 +311,7 @@ function main()
     weights = get_weights()
 
     @time losses = run_gradient_descent!(weights, features)
-    #store_weights(weights)
+    store_weights(weights)
 
     plot_loss(losses)
 
@@ -328,7 +327,7 @@ function plot_results()
 end
 
 function parameter_scan(; filename = "$(dirname(@__DIR__))/data/zurichess_serialize")
-    parameters = [()]
+    parameters = [(4, 25), (128, 300)]
     final_loss = zeros(Float32, length(parameters))
     features = Serialization.deserialize(filename)
     
@@ -336,7 +335,9 @@ function parameter_scan(; filename = "$(dirname(@__DIR__))/data/zurichess_serial
         weights = get_weights()
         
         losses = run_gradient_descent!(weights, copy(features),
-        k = parameters[i][1])
+        batch_size = parameters[i][1],
+        max_epochs = parameters[i][2])
+
         final_loss[i] = losses[end]
     end
     println(final_loss)
@@ -346,3 +347,5 @@ end
 main()
 #plot_results()
 #parameter_scan()
+
+# final loss for batch size = 128, 1000 epochs = 0.26242527906745167
