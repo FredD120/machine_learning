@@ -6,10 +6,13 @@ import .Threads
 import Serialization
 import Random
 
-const DATA_SIZE = 1_428_000       # max size zurichess = 1_428_000
-const BATCH_SIZE = 8            # train in batches for efficiency
-const K_VALUE = 3.0 / 500         # hyperparameter in sigmoid function
-const LEARNING_RATE = 1f2
+const DATA_SIZE = 1_428_000    # max size zurichess = 1_428_000
+const BATCH_SIZE = 8           # train in batches for efficiency
+const K_VALUE = 3.0 / 500      # hyperparameter in sigmoid function
+const LEARNING_RATE = 1f1      # small = slower convergence but no overshooting
+const TOLERANCE = 1e-5         # convergence criterion for loss
+const PST_TYPES = ["king", "queen", "rook", "bishop", "knight", "pawn"]
+const PST_TABLE_SIZE = 64
 
 "retrieve piece square tables from file"
 function get_pst(type)
@@ -20,23 +23,44 @@ function get_pst(type)
     end
 end
 
-function get_evaluation()
-    (kingMG, kingEG) = get_pst("king")
-    (queenMG, queenEG) = get_pst("queen")
-    (rookMG, rookEG) = get_pst("rook")
-    (bishopMG, bishopEG) = get_pst("bishop")
-    (knightMG, knightEG) = get_pst("knight")
-    (pawnMG, pawnEG) = get_pst("pawn")
+function get_weights()
+    (kingMG, kingEG) = get_pst(PST_TYPES[1])
+    (queenMG, queenEG) = get_pst(PST_TYPES[2])
+    (rookMG, rookEG) = get_pst(PST_TYPES[3])
+    (bishopMG, bishopEG) = get_pst(PST_TYPES[4])
+    (knightMG, knightEG) = get_pst(PST_TYPES[5])
+    (pawnMG, pawnEG) = get_pst(PST_TYPES[6])
 
-    eval = Float32[]
+    weights = Float32[]
 
     for vec in [kingMG, queenMG, rookMG, bishopMG, knightMG, pawnMG,
                 kingEG, queenEG, rookEG, bishopEG, knightEG, pawnEG]
         for v in vec
-            push!(eval, v)
+            push!(weights, v)
         end
     end
-    return eval
+    return weights
+end
+
+"store flattened weights as piece square table files matching get_weights order"
+function store_weights(weights::Vector{Float32}, folder = "$(dirname(@__DIR__))/PST_updated")
+    expected_length = 2 * length(PST_TYPES) * PST_TABLE_SIZE
+    length(weights) == expected_length || throw(ArgumentError("expected $expected_length weights, got $(length(weights))"))
+
+    mkpath(folder)
+    endgame_offset = length(PST_TYPES) * PST_TABLE_SIZE
+
+    for (i, type) in enumerate(PST_TYPES)
+        start_ind = (i - 1) * PST_TABLE_SIZE + 1
+        end_ind = i * PST_TABLE_SIZE
+        mg = copy(weights[start_ind:end_ind])
+        eg = copy(weights[endgame_offset + start_ind:endgame_offset + end_ind])
+
+        h5open(joinpath(folder, "$(type).h5"), "w") do fid
+            fid["MidGame"] = mg
+            fid["EndGame"] = eg
+        end
+    end
 end
 
 struct Position
@@ -55,7 +79,7 @@ function Position(fen::S, result::S) where {S <: AbstractString}
     features = zeros(Float32, 768)
 
     for type in 1:6 #[KING, QUEEN, ROOK, BISHOP, KNIGHT, PAWN]
-        for colour in [Scylla.WHITE, Scylla.BLACK]
+        for colour in [true, false] #[WHITE, BLACK]
             for pos in board.pieces[Scylla.long_index(colour) + type]
                 sign = Scylla.sgn(colour)
                 piece_ind = Scylla.side_index(colour, pos) + 1
@@ -185,14 +209,24 @@ end
 function run_gradient_descent!(
     weights::Vector{Float32},
     positions::Vector{Position};
-    epochs = 100,
+    max_epochs = 100,
     batch_size = BATCH_SIZE,
     learning_rate = LEARNING_RATE,
     k = K_VALUE,
-)
-    for i in 1:epochs
+    tol = TOLERANCE)
+
+    prev_loss = typemax(Float32)
+    count = 0
+    while count < max_epochs
+        count += 1
         gradient_descent!(weights, positions; batch_size, learning_rate, k)
-        println("Pass ", i, " completed, loss = ", mean_squared_error(positions, weights; k))
+        loss = mean_squared_error(positions, weights; k)
+        println("Epoch ", count, " completed, loss = ", loss)
+
+        if (prev_loss - loss) < tol
+            break
+        end
+        prev_loss = loss
     end
 end
 
@@ -200,9 +234,10 @@ function main()
     filename = "$(dirname(@__DIR__))/data/zurichess_serialize"
     #@time create_feature_data(filename)
     @time features = Serialization.deserialize(filename)
-    weights = get_evaluation()
+    weights = get_weights()
 
     run_gradient_descent!(weights, features)
+    store_weights(weights)
 
     #@btime c = evaluate_all($features, $weights)
     #@btime mean_squared_error($features, $weights)
