@@ -11,25 +11,29 @@ const BATCH_SIZE = 8           # train in batches for efficiency
 const K_VALUE = 3.0 / 500      # hyperparameter in sigmoid function
 const LEARNING_RATE = 1f1      # small = slower convergence but no overshooting
 const TOLERANCE = 1e-5         # convergence criterion for loss
+const MAX_EPOCHS = 1000        # final cutoff point for training
+
 const PST_TYPES = ["king", "queen", "rook", "bishop", "knight", "pawn"]
 const PST_TABLE_SIZE = 64
+const ORIGINAL_PST_FOLDER = "$(dirname(@__DIR__))/PST"
+const UPDATED_PST_FOLDER = "$(dirname(@__DIR__))/PST_updated"
 
 "retrieve piece square tables from file"
-function get_pst(type)
-    h5open("$(dirname(@__DIR__))/PST/$(type).h5", "r") do fid
+function get_pst(type, folder = ORIGINAL_PST_FOLDER)
+    h5open(joinpath(folder, "$(type).h5"), "r") do fid
         MG::Vector{Float32} = read(fid["MidGame"])
         EG::Vector{Float32} = read(fid["EndGame"])
         return (MG, EG)
     end
 end
 
-function get_weights()
-    (kingMG, kingEG) = get_pst(PST_TYPES[1])
-    (queenMG, queenEG) = get_pst(PST_TYPES[2])
-    (rookMG, rookEG) = get_pst(PST_TYPES[3])
-    (bishopMG, bishopEG) = get_pst(PST_TYPES[4])
-    (knightMG, knightEG) = get_pst(PST_TYPES[5])
-    (pawnMG, pawnEG) = get_pst(PST_TYPES[6])
+function get_weights(folder = ORIGINAL_PST_FOLDER)
+    (kingMG, kingEG) = get_pst(PST_TYPES[1], folder)
+    (queenMG, queenEG) = get_pst(PST_TYPES[2], folder)
+    (rookMG, rookEG) = get_pst(PST_TYPES[3], folder)
+    (bishopMG, bishopEG) = get_pst(PST_TYPES[4], folder)
+    (knightMG, knightEG) = get_pst(PST_TYPES[5], folder)
+    (pawnMG, pawnEG) = get_pst(PST_TYPES[6], folder)
 
     weights = Float32[]
 
@@ -43,7 +47,7 @@ function get_weights()
 end
 
 "store flattened weights as piece square table files matching get_weights order"
-function store_weights(weights::Vector{Float32}, folder = "$(dirname(@__DIR__))/PST_updated")
+function store_weights(weights::Vector{Float32}, folder = UPDATED_PST_FOLDER)
     expected_length = 2 * length(PST_TYPES) * PST_TABLE_SIZE
     length(weights) == expected_length || throw(ArgumentError("expected $expected_length weights, got $(length(weights))"))
 
@@ -61,6 +65,65 @@ function store_weights(weights::Vector{Float32}, folder = "$(dirname(@__DIR__))/
             fid["EndGame"] = eg
         end
     end
+end
+
+function pst_heatmap_matrix(table::Vector{Float32})
+    length(table) == PST_TABLE_SIZE || throw(ArgumentError("expected $PST_TABLE_SIZE PST values, got $(length(table))"))
+    return reverse(reshape(table, 8, 8), dims = 2)
+end
+
+"compare two PST folders and create one figure per piece with difference and original PST heatmaps"
+function plot_weight_differences(
+    original_folder = ORIGINAL_PST_FOLDER,
+    new_folder = UPDATED_PST_FOLDER;
+    save_folder = nothing)
+
+    figures = Figure[]
+
+    if save_folder !== nothing
+        mkpath(save_folder)
+    end
+
+    for type in PST_TYPES
+        (original_mg, original_eg) = get_pst(type, original_folder)
+        (new_mg, new_eg) = get_pst(type, new_folder)
+        mg_diff = new_mg .- original_mg
+        eg_diff = new_eg .- original_eg
+        scale = maximum(abs, vcat(mg_diff, eg_diff))
+        scale = scale == 0 ? 1f0 : scale
+        diff_colorrange = (-scale, scale)
+        original_scale = maximum(abs, vcat(original_mg, original_eg))
+        original_scale = original_scale == 0 ? 1f0 : original_scale
+        original_colorrange = (0, original_scale)
+
+        fig = Figure(size = (900, 820))
+        Label(fig[1, 1:2], uppercasefirst(type), fontsize = 24)
+
+        ax_mg_diff = Axis(fig[2, 1], title = "MidGame difference", aspect = DataAspect())
+        ax_eg_diff = Axis(fig[2, 2], title = "EndGame difference", aspect = DataAspect())
+        ax_mg_original = Axis(fig[3, 1], title = "Original MidGame", aspect = DataAspect())
+        ax_eg_original = Axis(fig[3, 2], title = "Original EndGame", aspect = DataAspect())
+
+        hm_diff = heatmap!(ax_mg_diff, pst_heatmap_matrix(mg_diff); colorrange = diff_colorrange, colormap = :RdBu)
+        heatmap!(ax_eg_diff, pst_heatmap_matrix(eg_diff); colorrange = diff_colorrange, colormap = :RdBu)
+        hm_original = heatmap!(ax_mg_original, pst_heatmap_matrix(original_mg); colorrange = original_colorrange, colormap = :RdBu)
+        heatmap!(ax_eg_original, pst_heatmap_matrix(original_eg); colorrange = original_colorrange, colormap = :RdBu)
+
+        Colorbar(fig[2, 3], hm_diff, label = "new - original")
+        Colorbar(fig[3, 3], hm_original, label = "original")
+
+        hidedecorations!(ax_mg_diff)
+        hidedecorations!(ax_eg_diff)
+        hidedecorations!(ax_mg_original)
+        hidedecorations!(ax_eg_original)
+        push!(figures, fig)
+
+        if save_folder !== nothing
+            save(joinpath(save_folder, "$(type)_weight_difference.png"), fig)
+        end
+    end
+
+    return figures
 end
 
 struct Position
@@ -209,7 +272,7 @@ end
 function run_gradient_descent!(
     weights::Vector{Float32},
     positions::Vector{Position};
-    max_epochs = 100,
+    max_epochs = MAX_EPOCHS,
     batch_size = BATCH_SIZE,
     learning_rate = LEARNING_RATE,
     k = K_VALUE,
@@ -217,27 +280,30 @@ function run_gradient_descent!(
 
     prev_loss = typemax(Float32)
     count = 0
+    losses = Float32[]
     while count < max_epochs
         count += 1
         gradient_descent!(weights, positions; batch_size, learning_rate, k)
         loss = mean_squared_error(positions, weights; k)
-        println("Epoch ", count, " completed, loss = ", loss)
+        push!(losses, loss)
 
+        println("Epoch ", count, " completed, loss = ", loss)
         if (prev_loss - loss) < tol
             break
         end
         prev_loss = loss
     end
+    return losses
 end
 
 function main()
     filename = "$(dirname(@__DIR__))/data/zurichess_serialize"
-    #@time create_feature_data(filename)
-    @time features = Serialization.deserialize(filename)
+    #create_feature_data(filename)
+    features = Serialization.deserialize(filename)
     weights = get_weights()
 
     run_gradient_descent!(weights, features)
-    store_weights(weights)
+    #store_weights(weights)
 
     #@btime c = evaluate_all($features, $weights)
     #@btime mean_squared_error($features, $weights)
@@ -245,4 +311,30 @@ function main()
     #plot_evaluation(features)
 end
 
-main()
+function plot_results()
+    plot_weight_differences(; save_folder = "$(dirname(@__DIR__))/PST_diff_plots")
+    return
+end
+
+function parameter_scan(; filename = "$(dirname(@__DIR__))/data/zurichess_serialize")
+    batch_sizes = [8, 32, 128]
+    learning_rates = [1f0, 1f1, 1f2]
+    parameters = [(b, r) for b in batch_sizes for r in learning_rates]
+    final_loss = zeros(Float32, 9)
+    features = Serialization.deserialize(filename)
+    
+    Threads.@threads for i in eachindex(parameters)
+        weights = get_weights()
+        
+        losses = run_gradient_descent!(weights, copy(features),
+        batch_size = parameters[i][1],
+        learning_rate = parameters[i][2])
+        final_loss[i] = losses[end]
+    end
+    println(final_loss)
+    println(parameters)
+end
+
+#main()
+#plot_results()
+parameter_scan()
