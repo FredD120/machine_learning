@@ -128,7 +128,7 @@ end
 struct Position
     features::Vector{Float32} # (white occupied positions) - (black occupied positions), for mid and endgame
     score::Float32            # score of position in actual game (win/draw/loss)
-    occupied::Vector{UInt32}  # only visit feautures that are non-zero
+    occupied::Vector{Int}  # only visit feautures that are non-zero
     original_eval::Int16      # for testing evaluation dot product
 end
 
@@ -160,7 +160,7 @@ function Position(fen::S, result::S) where {S <: AbstractString}
         score = -1.0
     end
     
-    occupied = UInt32[]
+    occupied = Int[]
     values = Float32[]
     for (i, f) in enumerate(features)
         if f != 0
@@ -233,27 +233,25 @@ function plot_evaluation(feature_set::Vector{Position}, BUCKET_COUNT = 100)
     barplot(buckets)
 end
 
-"take a vector and split into a vector of vectors, each of length batch_size"
-function batches(vec, batch_size)
-    batch_size > 0 || throw(ArgumentError("batch_size must be positive"))
-    len = length(vec)
-    return [@view vec[i:min(i + batch_size - 1, len)] for i in 1:batch_size:len]
-end
-
 "loop over all weights and nudge them in the direction that minimises the loss"
 function gradient_descent!(
     weights::Vector{Float32},
     positions::Vector{Position};
     batch_size = BATCH_SIZE,
     learning_rate = LEARNING_RATE,
-    k = K_VALUE,
-)
+    k = K_VALUE)
+
     Random.shuffle!(positions)
+    gradient = zeros(Float32, length(weights))
 
-    for batch in batches(positions, batch_size)
-        gradient = zeros(Float32, length(weights))
+    for start in 1:batch_size:length(positions)
+        stop = min(start + batch_size - 1, length(positions))
+        batch_len = 0
+        fill!(gradient, 0f0)
 
-        for position in batch
+        for i in start:stop
+            position = positions[i]
+            batch_len += 1
             y = position.score
             sigma_k = sigmoid(quality(position, weights), k)
 
@@ -264,7 +262,10 @@ function gradient_descent!(
             end
         end
 
-        weights .-= (4 * k * learning_rate / length(batch)) * gradient
+        scale = Float32(4 * k * learning_rate / batch_len)
+        for i in eachindex(weights, gradient)
+            weights[i] -= scale * gradient[i]
+        end
     end
 end
 
@@ -281,10 +282,13 @@ function run_gradient_descent!(
     while count < max_epochs
         count += 1
         gradient_descent!(weights, positions; batch_size, learning_rate, k)
-        loss = mean_squared_error(positions, weights; k)
-        push!(losses, loss)
 
-        println("Epoch ", count, " completed, loss = ", loss)
+        if count % 5 == 0
+            loss = mean_squared_error(positions, weights; k)
+            push!(losses, loss)
+            println("Epoch ", count, " completed, loss = ", loss)
+        end
+
     end
     return losses
 end
@@ -307,8 +311,8 @@ function main()
     features = Serialization.deserialize(filename)
     weights = get_weights()
 
-    losses = run_gradient_descent!(weights, features)
-    store_weights(weights)
+    @time losses = run_gradient_descent!(weights, features)
+    #store_weights(weights)
 
     plot_loss(losses)
 
@@ -324,7 +328,7 @@ function plot_results()
 end
 
 function parameter_scan(; filename = "$(dirname(@__DIR__))/data/zurichess_serialize")
-    parameters = [2, 3, 4, 5, 6] / 500
+    parameters = [()]
     final_loss = zeros(Float32, length(parameters))
     features = Serialization.deserialize(filename)
     
